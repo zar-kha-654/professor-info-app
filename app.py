@@ -167,100 +167,126 @@ def same_domain(url, original_domain):
 # ============================================================
 
 def download_page(url):
+    """
+    Download a webpage and extract its text and links.
+    Designed to work with university websites that use
+    stricter HTTP/CDN configurations.
+    """
 
-    try:
+    headers_list = [
+        {
+            "User-Agent": USER_AGENT,
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Accept-Encoding": "gzip, deflate",
+            "Connection": "keep-alive",
+            "Upgrade-Insecure-Requests": "1",
+        },
+        {
+            "User-Agent": (
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/131.0.0.0 Safari/537.36"
+            ),
+            "Accept": "*/*",
+            "Accept-Language": "en-US,en;q=0.9",
+        },
+    ]
 
-        response = requests.get(
-            url,
-            headers={
-                "User-Agent": USER_AGENT,
-                "Accept": (
-                    "text/html,application/xhtml+xml,"
-                    "application/xml;q=0.9,*/*;q=0.8"
-                ),
-                "Accept-Language": "en-US,en;q=0.9"
-            },
-            timeout=REQUEST_TIMEOUT,
-            allow_redirects=True
-        )
+    for headers in headers_list:
 
-        if response.status_code != 200:
+        try:
 
-            return "", []
+            session = requests.Session()
 
-        # IMPORTANT:
-        # Do not reject the page just because Content-Type
-        # is unusual or missing.
-
-        content = response.text
-
-        if not content:
-
-            return "", []
-
-        soup = BeautifulSoup(
-            content,
-            "html.parser"
-        )
-
-        # Remove things that aren't useful for extraction
-        for tag in soup.find_all([
-            "script",
-            "style",
-            "noscript",
-            "svg"
-        ]):
-
-            tag.decompose()
-
-        # Extract text
-        text = soup.get_text(
-            " ",
-            strip=True
-        )
-
-        text = re.sub(
-            r"\s+",
-            " ",
-            text
-        ).strip()
-
-        text = text[:MAX_TEXT_PER_PAGE]
-
-        # Extract links
-        links = []
-
-        for tag in soup.find_all("a", href=True):
-
-            href = tag.get("href")
-
-            if not href:
-                continue
-
-            # Ignore non-web links
-            if href.startswith((
-                "mailto:",
-                "tel:",
-                "javascript:",
-                "#"
-            )):
-                continue
-
-            absolute = urljoin(
-                response.url,
-                href
+            response = session.get(
+                url,
+                headers=headers,
+                timeout=REQUEST_TIMEOUT,
+                allow_redirects=True
             )
 
-            # Remove fragments
-            absolute = absolute.split("#")[0]
+            # Don't require a particular Content-Type.
+            # Some university/CDN servers don't report it normally.
+            if response.status_code != 200:
+                continue
 
-            links.append(absolute)
+            html = response.content
 
-        return text, list(set(links))
+            if not html:
+                continue
 
-    except Exception as e:
+            soup = BeautifulSoup(
+                html,
+                "html.parser"
+            )
 
-        return "", []
+            # Remove things we don't need
+            for tag in soup.find_all([
+                "script",
+                "style",
+                "noscript",
+                "svg"
+            ]):
+                tag.decompose()
+
+            # Extract text
+            text = soup.get_text(
+                separator=" ",
+                strip=True
+            )
+
+            text = re.sub(
+                r"\s+",
+                " ",
+                text
+            ).strip()
+
+            if not text:
+                continue
+
+            text = text[:MAX_TEXT_PER_PAGE]
+
+            # Extract links
+            links = []
+
+            for a in soup.find_all("a", href=True):
+
+                href = a.get("href")
+
+                if not href:
+                    continue
+
+                if href.startswith(
+                    (
+                        "mailto:",
+                        "tel:",
+                        "javascript:",
+                        "#"
+                    )
+                ):
+                    continue
+
+                absolute_url = urljoin(
+                    response.url,
+                    href
+                )
+
+                absolute_url = absolute_url.split("#")[0]
+
+                links.append(
+                    absolute_url
+                )
+
+            return text, list(set(links))
+
+        except requests.RequestException:
+            continue
+
+        except Exception:
+            continue
+
+    return "", []
 
 
 # ============================================================
