@@ -18,7 +18,7 @@ MODEL = "openai/gpt-oss-120b"
 # ============================================================
 
 st.set_page_config(
-    page_title="Professor Info Extractor",
+    page_title="Professor Information Extractor",
     page_icon="🎓",
     layout="wide"
 )
@@ -26,18 +26,19 @@ st.set_page_config(
 st.title("🎓 Professor Information Extractor")
 
 st.write(
-    "Upload your spreadsheet, enter an institutional website, "
-    "choose how many professors you need, and download the completed file."
+    "Upload your spreadsheet, provide an institutional website, "
+    "select a department, choose how many professors you need, "
+    "and download the completed spreadsheet."
 )
 
 st.info(
-    "The AI is instructed to use ONLY information found on the "
-    "institution's website. If something cannot be found, it stays blank."
+    "Only information explicitly found on the official institutional "
+    "website should be used. Missing information is left blank."
 )
 
 
 # ============================================================
-# API
+# GROQ
 # ============================================================
 
 def get_client():
@@ -54,14 +55,14 @@ def get_client():
 
 
 # ============================================================
-# EXTRACT JSON
+# PARSE JSON
 # ============================================================
 
 def parse_json(text):
 
     text = text.strip()
 
-    # Remove markdown fences if they appear
+    # Remove markdown code blocks
     text = re.sub(
         r"```json\s*",
         "",
@@ -77,7 +78,7 @@ def parse_json(text):
 
     text = text.strip()
 
-    # First try normal JSON
+    # Try direct JSON
     try:
         return json.loads(text)
     except Exception:
@@ -102,11 +103,12 @@ def parse_json(text):
 
 
 # ============================================================
-# AI RESEARCH
+# RESEARCH
 # ============================================================
 
 def research_website(
     website_url,
+    department,
     columns,
     number_needed
 ):
@@ -114,20 +116,10 @@ def research_website(
     client = get_client()
 
     if client is None:
+
         raise ValueError(
             "GROQ_API_KEY is missing from Streamlit Secrets."
         )
-
-    # Extract domain
-    domain_match = re.search(
-        r"https?://([^/]+)",
-        website_url
-    )
-
-    if domain_match:
-        domain = domain_match.group(1)
-    else:
-        domain = website_url
 
     columns_text = "\n".join(
         f"- {column}"
@@ -135,144 +127,202 @@ def research_website(
     )
 
     prompt = f"""
-You are a website research and structured-data extraction agent.
+You are a strict university website research and
+structured-data extraction agent.
 
-The user gave you this institutional website:
+The user provided this official institutional website:
 
 {website_url}
 
-Institution domain:
+The user wants professors from this department:
 
-{domain}
+{department}
 
-The user uploaded a spreadsheet with these EXACT columns:
+The user wants up to:
+
+{number_needed}
+
+professors.
+
+The user's spreadsheet has these EXACT columns:
 
 {columns_text}
 
-The user wants up to {number_needed} professor/faculty records.
+============================================================
+RESEARCH INSTRUCTIONS
+============================================================
 
-==================================================
-YOUR TASK
-==================================================
-
-Use your browser search capability to research ONLY the
-institution represented by:
-
-{domain}
-
-You MUST NOT use information from unrelated universities,
-blogs, LinkedIn, Wikipedia, social media, ranking websites,
-or other third-party sources.
-
-The institution's own official website is the ONLY acceptable
-source of information.
-
-Start with the supplied URL:
+Use the browser search tool to research ONLY the official
+institutional website associated with:
 
 {website_url}
 
-Find relevant faculty/people/professor pages on the same
-institutional website.
+Start from the supplied website.
 
-You may also search the same official institutional domain
-for information such as:
+Find the relevant:
 
-- university name
-- faculty
-- professors
-- departments
-- programs
-- application fee
-- application deadline
-- admissions
+- department page
+- faculty page
+- people page
+- professor profiles
+- academic staff pages
 - program pages
+- admissions pages
+- application pages
+- fee pages
+- deadline pages
 
-==================================================
-STRICT INFORMATION RULES
-==================================================
+You may search the institution's official domain to find
+additional relevant pages.
 
-1. ONLY use information explicitly found on the official
-   institutional website.
+============================================================
+DEPARTMENT FILTER
+============================================================
 
-2. NEVER use your general knowledge.
+ONLY include professors who are explicitly associated with:
 
-3. NEVER guess.
+{department}
 
-4. NEVER infer an email address.
+The association must be supported by the official website.
 
-5. NEVER create an email from a professor's name.
+For example, acceptable evidence could be:
 
-6. NEVER invent an application fee.
+- The professor's official profile says they belong to the department.
+- The department's official faculty page lists the professor.
+- The university identifies the professor as faculty of that department.
+- The professor's official university page explicitly names the department.
 
-7. NEVER invent an application deadline.
+DO NOT assume that a professor belongs to the department
+just because their research sounds related to it.
 
-8. NEVER invent a department.
+DO NOT include professors from other departments.
 
-9. NEVER invent a university name.
+If the requested department cannot be verified from the
+official website, return no professor records rather than
+guessing.
 
-10. If information is not found, return an empty string.
+============================================================
+STRICT SOURCE RULE
+============================================================
 
-11. Do not use information from another university.
+Use ONLY the official institutional website.
 
-12. Do not use third-party websites.
+Do NOT use:
 
-13. Prefer official individual professor profile pages when
-    available.
+- Wikipedia
+- LinkedIn
+- Google profiles
+- ResearchGate
+- personal websites
+- ranking websites
+- news websites
+- third-party directories
+- other universities
 
-14. Prefer actual professors, associate professors, assistant
-    professors, faculty members, academic staff, or researchers
-    explicitly identified by the university.
+============================================================
+NO-GUESSING RULE
+============================================================
 
-15. Do not include students.
+NEVER guess.
 
-16. Do not include random staff members unless they are clearly
-    academic/faculty members.
+NEVER infer.
 
-17. Do not include advisory board members unless the university
-    explicitly identifies them as academic/faculty members.
+NEVER fabricate.
 
-18. Return no more than {number_needed} people.
+NEVER use your general knowledge.
 
-19. Do not make up additional records just to reach the requested
-    number.
+If information cannot be found explicitly on the official
+institutional website, return an empty string.
 
-20. If only 3 suitable professors can be verified, return 3.
+For example:
 
-==================================================
+If professor email is not found:
+"Email": ""
+
+If application fee is not found:
+"Application Fee": ""
+
+If deadline is not found:
+"Application Deadline": ""
+
+============================================================
+PROFESSOR RULES
+============================================================
+
+Only include actual academic/faculty members such as:
+
+- Professor
+- Associate Professor
+- Assistant Professor
+- Lecturer
+- Academic staff
+- Faculty member
+- Researcher
+
+ONLY when the official website identifies them as belonging
+to the requested department.
+
+Do NOT include:
+
+- students
+- alumni
+- random administrative staff
+- visitors
+- unrelated researchers
+- people from another department
+
+============================================================
 APPLICATION INFORMATION
-==================================================
+============================================================
 
-Application fee and deadline may exist on a separate official
-admissions/program page.
+Application fee and application deadline may be located
+on separate official university pages.
 
-If you find them on the official institutional website, use them.
+Search the official university website for them.
 
-If you cannot find them, leave the cells blank.
+However:
 
-Do NOT assume that a fee or deadline applies to every program
-unless the official website explicitly indicates that it does.
+DO NOT assume that an application fee or deadline applies
+to the professor's department/program unless the official
+website explicitly establishes that relationship.
 
-==================================================
-SPREADSHEET RULE
-==================================================
+If it cannot be established:
 
-You MUST return EXACTLY the following columns:
+return an empty string.
+
+============================================================
+SPREADSHEET
+============================================================
+
+Return EXACTLY these columns:
 
 {columns_text}
 
-Do not add columns.
+Do NOT:
 
-Do not rename columns.
+- rename columns
+- remove columns
+- create additional columns
 
-Do not remove columns.
+Every record must contain every column.
 
-==================================================
-OUTPUT
-==================================================
+============================================================
+NUMBER OF PROFESSORS
+============================================================
 
-Return ONLY a JSON object.
+Return UP TO {number_needed} verified professors.
 
-Use this exact structure:
+If only 2 professors can be verified:
+
+return 2.
+
+Do NOT invent additional professors to reach the requested number.
+
+============================================================
+OUTPUT FORMAT
+============================================================
+
+Return ONLY this JSON structure:
 
 {{
     "records": [
@@ -285,40 +335,51 @@ Use this exact structure:
 
 Every record must contain every requested column.
 
-If a value cannot be verified from the official website,
-use an empty string.
+Use an empty string for unavailable information.
 
-==================================================
+============================================================
 IMPORTANT
-==================================================
+============================================================
 
-The final spreadsheet must contain factual information
-that can be traced to the official institutional website.
+The information must be traceable to the official
+institutional website.
 
-DO NOT fill missing information with your own knowledge.
+The department association must also be explicitly
+supported by the official website.
 
 Institutional website:
 
 {website_url}
 
+Department:
+
+{department}
+
 Requested columns:
 
 {columns_text}
 
-Requested number of professors:
+Number requested:
 
 {number_needed}
 """
 
+    # IMPORTANT:
+    # Do NOT use response_format here.
+    #
+    # Groq does not allow JSON mode + browser tool calling.
+
     response = client.chat.completions.create(
+
         model=MODEL,
+
         messages=[
             {
                 "role": "system",
                 "content": (
-                    "You are a strict web research and data extraction "
-                    "agent. Never fabricate information. Use only "
-                    "official institutional sources requested by the user."
+                    "You are a strict university website research "
+                    "agent. Use only official institutional sources. "
+                    "Never fabricate or guess information."
                 )
             },
             {
@@ -326,25 +387,27 @@ Requested number of professors:
                 "content": prompt
             }
         ],
+
         tools=[
             {
                 "type": "browser_search"
             }
         ],
-        tool_choice="auto",
-        response_format={
-            "type": "json_object"
-        }
+
+        tool_choice="auto"
     )
 
     content = response.choices[0].message.content
 
     if not content:
+
         raise ValueError(
-            "The AI did not return any results."
+            "The AI returned an empty response."
         )
 
-    return parse_json(content)
+    return parse_json(
+        content
+    )
 
 
 # ============================================================
@@ -354,7 +417,7 @@ Requested number of professors:
 def clean_records(
     data,
     columns,
-    requested_number
+    number_needed
 ):
 
     if isinstance(data, dict):
@@ -391,19 +454,21 @@ def clean_records(
             if value is None:
                 value = ""
 
-            # Convert lists/dicts safely
-            if isinstance(value, (list, dict)):
+            if isinstance(
+                value,
+                (list, dict)
+            ):
 
                 value = json.dumps(
                     value,
                     ensure_ascii=False
                 )
 
-            value = str(value).strip()
+            row[column] = str(
+                value
+            ).strip()
 
-            row[column] = value
-
-        # Don't include completely empty rows
+        # Ignore completely empty records
         if any(
             value != ""
             for value in row.values()
@@ -411,7 +476,7 @@ def clean_records(
 
             cleaned.append(row)
 
-    return cleaned[:requested_number]
+    return cleaned[:number_needed]
 
 
 # ============================================================
@@ -444,10 +509,10 @@ def make_excel(df):
 
 with st.sidebar:
 
-    st.header("⚙️ Settings")
+    st.header("⚙️ Search Settings")
 
     number_needed = st.number_input(
-        "How many professors?",
+        "Number of professors",
         min_value=1,
         max_value=50,
         value=5,
@@ -455,7 +520,7 @@ with st.sidebar:
     )
 
     st.caption(
-        "The app will return up to this many verified records."
+        "The app returns up to this many verified professors."
     )
 
 
@@ -466,7 +531,7 @@ with st.sidebar:
 st.header("1️⃣ Upload Spreadsheet")
 
 uploaded_file = st.file_uploader(
-    "Upload Excel or CSV",
+    "Upload your Excel or CSV file",
     type=[
         "xlsx",
         "xls",
@@ -480,7 +545,9 @@ if uploaded_file:
 
     try:
 
-        if uploaded_file.name.lower().endswith(".csv"):
+        if uploaded_file.name.lower().endswith(
+            ".csv"
+        ):
 
             df = pd.read_csv(
                 uploaded_file
@@ -502,7 +569,9 @@ if uploaded_file:
             f"Loaded: {uploaded_file.name}"
         )
 
-        st.write("### Your columns")
+        st.write(
+            "**Detected columns:**"
+        )
 
         st.write(
             list(df.columns)
@@ -516,7 +585,7 @@ if uploaded_file:
     except Exception as e:
 
         st.error(
-            f"Could not read the spreadsheet: {e}"
+            f"Could not read spreadsheet: {e}"
         )
 
 
@@ -527,26 +596,67 @@ if uploaded_file:
 st.header("2️⃣ Institutional Website")
 
 website_url = st.text_input(
-    "Paste the university/institution website URL",
+    "Institutional website",
     placeholder="https://www.unimelb.edu.au/cdmps/people"
 )
 
 
 # ============================================================
-# STEP 3
+# STEP 3 - DEPARTMENT
 # ============================================================
 
-st.header("3️⃣ Generate")
+st.header("3️⃣ Professor Department")
+
+department_options = [
+    "Computer Science",
+    "Artificial Intelligence",
+    "Data Science",
+    "Software Engineering",
+    "Electrical Engineering",
+    "Mechanical Engineering",
+    "Civil Engineering",
+    "Business",
+    "Economics",
+    "Mathematics",
+    "Statistics",
+    "Physics",
+    "Chemistry",
+    "Biology",
+    "Other"
+]
+
+department_choice = st.selectbox(
+    "Select department",
+    department_options
+)
+
+if department_choice == "Other":
+
+    department = st.text_input(
+        "Enter department name",
+        placeholder="e.g. Information Systems"
+    )
+
+else:
+
+    department = department_choice
+
+
+# ============================================================
+# STEP 4
+# ============================================================
+
+st.header("4️⃣ Generate")
 
 if st.button(
-    "🚀 Find Professor Information",
+    "🚀 Find Professors",
     type="primary",
     use_container_width=True
 ):
 
-    # -------------------------------
+    # --------------------------------------------------------
     # Validation
-    # -------------------------------
+    # --------------------------------------------------------
 
     if df is None:
 
@@ -559,7 +669,15 @@ if st.button(
     if not website_url.strip():
 
         st.error(
-            "Please enter the institutional website URL."
+            "Please enter the institutional website."
+        )
+
+        st.stop()
+
+    if not department.strip():
+
+        st.error(
+            "Please select or enter a department."
         )
 
         st.stop()
@@ -571,14 +689,14 @@ if st.button(
         )
 
         st.info(
-            "Add GROQ_API_KEY under Streamlit → Settings → Secrets."
+            "Add GROQ_API_KEY in Streamlit → Settings → Secrets."
         )
 
         st.stop()
 
-    # -------------------------------
+    # --------------------------------------------------------
     # Research
-    # -------------------------------
+    # --------------------------------------------------------
 
     st.subheader(
         "🔎 Researching official website..."
@@ -587,15 +705,15 @@ if st.button(
     status = st.empty()
 
     status.info(
-        "Groq is searching the institutional website and "
-        "finding relevant faculty and application information. "
-        "This can take a little time."
+        f"Searching for {department} professors "
+        f"and verifying information..."
     )
 
     try:
 
         result = research_website(
             website_url=website_url,
+            department=department,
             columns=list(df.columns),
             number_needed=number_needed
         )
@@ -616,9 +734,9 @@ if st.button(
 
         st.stop()
 
-    # -------------------------------
+    # --------------------------------------------------------
     # Clean
-    # -------------------------------
+    # --------------------------------------------------------
 
     records = clean_records(
         result,
@@ -626,30 +744,36 @@ if st.button(
         number_needed
     )
 
+    # --------------------------------------------------------
+    # No results
+    # --------------------------------------------------------
+
     if not records:
 
         st.warning(
-            "No verified professor records were found "
-            "on the supplied institutional website."
+            f"No verified professors from "
+            f"'{department}' were found on the "
+            f"official institutional website."
         )
 
         st.stop()
 
-    # -------------------------------
-    # Create DataFrame
-    # -------------------------------
+    # --------------------------------------------------------
+    # DataFrame
+    # --------------------------------------------------------
 
     result_df = pd.DataFrame(
         records,
         columns=list(df.columns)
     )
 
-    # -------------------------------
+    # --------------------------------------------------------
     # Results
-    # -------------------------------
+    # --------------------------------------------------------
 
     st.success(
-        f"Found {len(result_df)} verified records."
+        f"Found {len(result_df)} verified "
+        f"{department} professor(s)."
     )
 
     st.subheader(
@@ -662,9 +786,9 @@ if st.button(
         height=500
     )
 
-    # -------------------------------
+    # --------------------------------------------------------
     # Download
-    # -------------------------------
+    # --------------------------------------------------------
 
     excel_file = make_excel(
         result_df
@@ -673,7 +797,7 @@ if st.button(
     st.download_button(
         label="⬇️ Download Prepared Spreadsheet",
         data=excel_file,
-        file_name="prepared_professor_information.xlsx",
+        file_name="professor_information.xlsx",
         mime=(
             "application/vnd.openxmlformats-officedocument."
             "spreadsheetml.sheet"
