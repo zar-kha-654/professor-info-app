@@ -3,6 +3,7 @@ import pandas as pd
 import json
 import re
 from io import BytesIO
+from urllib.parse import urlparse
 from groq import Groq
 
 
@@ -18,422 +19,411 @@ MODEL = "openai/gpt-oss-120b"
 # ============================================================
 
 st.set_page_config(
-    page_title="Professor Information Extractor",
+    page_title="Professor Information Finder",
     page_icon="🎓",
     layout="wide"
 )
 
-st.title("🎓 Professor Information Extractor")
-
+st.title("🎓 Professor Information Finder")
 st.write(
-    "Upload your spreadsheet, provide an institutional website, "
-    "select a department, choose how many professors you need, "
-    "and download the completed spreadsheet."
-)
-
-st.info(
-    "Only information explicitly found on the official institutional "
-    "website should be used. Missing information is left blank."
+    "Upload your spreadsheet, enter an institutional website, "
+    "choose a department, and let AI fill your spreadsheet."
 )
 
 
 # ============================================================
-# GROQ
+# GROQ CLIENT
 # ============================================================
 
 def get_client():
-
     try:
         api_key = st.secrets["GROQ_API_KEY"]
     except Exception:
-        return None
-
-    if not api_key:
-        return None
+        raise Exception(
+            "GROQ_API_KEY is missing from Streamlit Secrets."
+        )
 
     return Groq(api_key=api_key)
 
 
 # ============================================================
-# PARSE JSON
+# HELPERS
 # ============================================================
 
-def parse_json(text):
+def get_domain(url):
+    parsed = urlparse(url)
+
+    domain = parsed.netloc.lower()
+
+    if domain.startswith("www."):
+        domain = domain[4:]
+
+    return domain
+
+
+def clean_json_text(text):
+    """
+    Remove markdown code fences if the AI returns them.
+    """
+
+    if not text:
+        return ""
 
     text = text.strip()
 
-    # Remove markdown code blocks
     text = re.sub(
-        r"```json\s*",
+        r"^```(?:json)?\s*",
         "",
         text,
         flags=re.IGNORECASE
     )
 
     text = re.sub(
-        r"```\s*$",
+        r"\s*```$",
         "",
         text
     )
 
-    text = text.strip()
+    return text.strip()
 
-    # Try direct JSON
+
+def parse_json_response(text):
+    """
+    Safely extract JSON from the AI response.
+    """
+
+    if not text:
+        return None
+
+    text = clean_json_text(text)
+
+    # First attempt
     try:
         return json.loads(text)
     except Exception:
         pass
 
-    # Find JSON object
-    start = text.find("{")
-    end = text.rfind("}")
+    # Try to find JSON object
+    match = re.search(
+        r"\{.*\}",
+        text,
+        flags=re.DOTALL
+    )
 
-    if start != -1 and end != -1:
-
+    if match:
         try:
-            return json.loads(
-                text[start:end + 1]
-            )
+            return json.loads(match.group())
         except Exception:
             pass
 
-    raise ValueError(
-        "The AI returned invalid JSON."
-    )
+    return None
 
 
 # ============================================================
-# RESEARCH
+# STEP 1 — RESEARCH WEBSITE
 # ============================================================
 
 def research_website(
     website_url,
     department,
-    columns,
     number_needed
 ):
 
     client = get_client()
 
-    if client is None:
+    domain = get_domain(website_url)
 
-        raise ValueError(
-            "GROQ_API_KEY is missing from Streamlit Secrets."
-        )
+    research_prompt = f"""
+You are a university research assistant.
 
-    columns_text = "\n".join(
-        f"- {column}"
-        for column in columns
-    )
+IMPORTANT:
+You MUST research the university website provided below.
 
-    prompt = f"""
-You are a strict university website research and
-structured-data extraction agent.
-
-The user provided this official institutional website:
-
+STARTING WEBSITE:
 {website_url}
 
-The user wants professors from this department:
+OFFICIAL DOMAIN:
+{domain}
 
+TARGET DEPARTMENT:
 {department}
 
-The user wants up to:
-
+NUMBER OF PROFESSORS NEEDED:
 {number_needed}
 
-professors.
+YOUR TASK:
 
-The user's spreadsheet has these EXACT columns:
+Find professors/faculty members who are explicitly associated
+with the TARGET DEPARTMENT on the official university website.
 
-{columns_text}
+Search the official university website carefully.
 
-============================================================
-RESEARCH INSTRUCTIONS
-============================================================
+You may look for:
 
-Use the browser search tool to research ONLY the official
-institutional website associated with:
-
-{website_url}
-
-Start from the supplied website.
-
-Find the relevant:
-
-- department page
-- faculty page
-- people page
-- professor profiles
+- faculty pages
+- people pages
+- staff pages
+- professor profile pages
+- department pages
 - academic staff pages
+- school pages
 - program pages
-- admissions pages
-- application pages
-- fee pages
-- deadline pages
 
-You may search the institution's official domain to find
-additional relevant pages.
-
-============================================================
-DEPARTMENT FILTER
-============================================================
-
-ONLY include professors who are explicitly associated with:
-
-{department}
-
-The association must be supported by the official website.
-
-For example, acceptable evidence could be:
-
-- The professor's official profile says they belong to the department.
-- The department's official faculty page lists the professor.
-- The university identifies the professor as faculty of that department.
-- The professor's official university page explicitly names the department.
-
-DO NOT assume that a professor belongs to the department
-just because their research sounds related to it.
-
-DO NOT include professors from other departments.
-
-If the requested department cannot be verified from the
-official website, return no professor records rather than
-guessing.
-
-============================================================
-STRICT SOURCE RULE
-============================================================
-
-Use ONLY the official institutional website.
-
-Do NOT use:
-
-- Wikipedia
-- LinkedIn
-- Google profiles
-- ResearchGate
-- personal websites
-- ranking websites
-- news websites
-- third-party directories
-- other universities
-
-============================================================
-NO-GUESSING RULE
-============================================================
-
-NEVER guess.
-
-NEVER infer.
-
-NEVER fabricate.
-
-NEVER use your general knowledge.
-
-If information cannot be found explicitly on the official
-institutional website, return an empty string.
-
-For example:
-
-If professor email is not found:
-"Email": ""
-
-If application fee is not found:
-"Application Fee": ""
-
-If deadline is not found:
-"Application Deadline": ""
-
-============================================================
-PROFESSOR RULES
-============================================================
-
-Only include actual academic/faculty members such as:
-
-- Professor
-- Associate Professor
-- Assistant Professor
-- Lecturer
-- Academic staff
-- Faculty member
-- Researcher
-
-ONLY when the official website identifies them as belonging
-to the requested department.
-
-Do NOT include:
-
-- students
-- alumni
-- random administrative staff
-- visitors
-- unrelated researchers
-- people from another department
-
-============================================================
-APPLICATION INFORMATION
-============================================================
-
-Application fee and application deadline may be located
-on separate official university pages.
-
-Search the official university website for them.
-
-However:
-
-DO NOT assume that an application fee or deadline applies
-to the professor's department/program unless the official
-website explicitly establishes that relationship.
-
-If it cannot be established:
-
-return an empty string.
-
-============================================================
-SPREADSHEET
-============================================================
-
-Return EXACTLY these columns:
-
-{columns_text}
-
-Do NOT:
-
-- rename columns
-- remove columns
-- create additional columns
-
-Every record must contain every column.
-
-============================================================
-NUMBER OF PROFESSORS
-============================================================
-
-Return UP TO {number_needed} verified professors.
-
-If only 2 professors can be verified:
-
-return 2.
-
-Do NOT invent additional professors to reach the requested number.
-
-============================================================
-OUTPUT FORMAT
-============================================================
-
-Return ONLY this JSON structure:
-
-{{
-    "records": [
-        {{
-            "COLUMN_NAME_1": "value",
-            "COLUMN_NAME_2": "value"
-        }}
-    ]
-}}
-
-Every record must contain every requested column.
-
-Use an empty string for unavailable information.
-
-============================================================
-IMPORTANT
-============================================================
-
-The information must be traceable to the official
-institutional website.
-
-The department association must also be explicitly
-supported by the official website.
-
-Institutional website:
-
-{website_url}
-
-Department:
-
-{department}
-
-Requested columns:
-
-{columns_text}
-
-Number requested:
-
-{number_needed}
+STRICT RULES:
+
+1. Use ONLY the official university website.
+2. Do NOT use:
+   - Wikipedia
+   - LinkedIn
+   - ResearchGate
+   - Google profiles
+   - third-party websites
+   - other universities
+3. Only include people who are explicitly associated with
+   the requested department.
+4. Do NOT guess department membership from research interests.
+5. Only include actual professors/faculty/academic staff.
+6. Do not include students.
+7. Do not include random administrative staff.
+8. Never invent an email address.
+9. Never invent a deadline.
+10. Never invent an application fee.
+11. If information is not available, leave it blank.
+12. Prefer individual official profile pages when available.
+13. Find up to {number_needed} verified professors.
+14. If fewer than {number_needed} can be verified, return fewer.
+15. Keep the research focused and do not spend excessive time
+    searching unrelated pages.
+
+For each professor, collect whatever information is explicitly
+available on the official website.
+
+Return a clear research report containing:
+
+- professor name
+- official profile URL
+- email if available
+- department/program
+- university name
+- application fee if explicitly available
+- application deadline if explicitly available
+- supporting official website pages
+- any useful evidence showing the professor belongs to
+  the requested department
+
+DO NOT create JSON.
+
+Just provide the factual research information in plain text.
+
+Do not make assumptions.
 """
 
-    # IMPORTANT:
-    # Do NOT use response_format here.
-    #
-    # Groq does not allow JSON mode + browser tool calling.
+    try:
 
-    response = client.chat.completions.create(
-
-        model=MODEL,
-
-        messages=[
-            {
-                "role": "system",
-                "content": (
-                    "You are a strict university website research "
-                    "agent. Use only official institutional sources. "
-                    "Never fabricate or guess information."
-                )
-            },
-            {
-                "role": "user",
-                "content": prompt
-            }
-        ],
-
-        tools=[
-            {
-                "type": "browser_search"
-            }
-        ],
-
-        tool_choice="auto"
-    )
-
-    content = response.choices[0].message.content
-
-    if not content:
-
-        raise ValueError(
-            "The AI returned an empty response."
+        response = client.chat.completions.create(
+            model=MODEL,
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You are a careful university research assistant. "
+                        "Use official sources only and never fabricate information."
+                    )
+                },
+                {
+                    "role": "user",
+                    "content": research_prompt
+                }
+            ],
+            tools=[
+                {
+                    "type": "browser_search"
+                }
+            ],
+            tool_choice="required",
+            temperature=0.1,
+            max_completion_tokens=6000,
+            reasoning_effort="low",
+            stream=False
         )
 
-    return parse_json(
-        content
-    )
+        message = response.choices[0].message
+
+        research_text = message.content
+
+        # Safety fallback if content is empty
+        if not research_text:
+
+            reasoning = getattr(
+                message,
+                "reasoning",
+                None
+            )
+
+            if reasoning:
+                research_text = reasoning
+
+        if not research_text:
+
+            executed_tools = getattr(
+                message,
+                "executed_tools",
+                None
+            )
+
+            if executed_tools:
+
+                research_text = str(
+                    executed_tools
+                )
+
+        if not research_text:
+
+            raise Exception(
+                "The website research returned no usable information. "
+                "Please try again."
+            )
+
+        return research_text
+
+    except Exception as e:
+
+        raise Exception(
+            f"Website research failed: {str(e)}"
+        )
 
 
 # ============================================================
-# CLEAN RESULTS
+# STEP 2 — EXTRACT INTO SPREADSHEET FORMAT
 # ============================================================
 
-def clean_records(
-    data,
+def extract_professors(
+    research_text,
     columns,
+    department,
     number_needed
 ):
 
-    if isinstance(data, dict):
+    client = get_client()
 
-        records = data.get(
-            "records",
-            []
+    columns_text = ", ".join(columns)
+
+    extraction_prompt = f"""
+You are a data extraction assistant.
+
+We researched an official university website.
+
+TARGET DEPARTMENT:
+{department}
+
+NUMBER OF PROFESSORS REQUESTED:
+{number_needed}
+
+THE USER'S EXISTING SPREADSHEET COLUMNS ARE:
+
+{columns_text}
+
+IMPORTANT:
+
+Return ONLY a JSON object in exactly this structure:
+
+{{
+  "records": [
+    {{
+      "Column Name": "value"
+    }}
+  ]
+}}
+
+RULES:
+
+1. Use ONLY information present in the research text.
+2. Do not browse the internet.
+3. Do not invent information.
+4. Do not guess.
+5. Do not infer missing information.
+6. If a field is unavailable, use an empty string.
+7. Every record MUST contain every spreadsheet column.
+8. Use the exact column names provided by the user.
+9. Do not create additional columns.
+10. Only include professors explicitly associated with
+    the requested department.
+11. Do not include students.
+12. Do not include unrelated staff.
+13. Maximum {number_needed} records.
+14. If there are fewer verified professors, return fewer.
+15. Keep official URLs exactly as found.
+16. Do not change or fabricate URLs.
+
+RESEARCH TEXT:
+
+{research_text}
+"""
+
+    try:
+
+        response = client.chat.completions.create(
+            model=MODEL,
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You extract information accurately. "
+                        "Never fabricate missing data."
+                    )
+                },
+                {
+                    "role": "user",
+                    "content": extraction_prompt
+                }
+            ],
+            response_format={
+                "type": "json_object"
+            },
+            temperature=0,
+            max_completion_tokens=5000,
+            stream=False
         )
 
-    elif isinstance(data, list):
+        content = response.choices[0].message.content
 
-        records = data
+        if not content:
+            raise Exception(
+                "The extraction AI returned an empty response."
+            )
 
-    else:
+        data = parse_json_response(content)
 
-        records = []
+        if not data:
+            raise Exception(
+                "The extraction AI returned invalid JSON."
+            )
+
+        records = data.get("records", [])
+
+        if not isinstance(records, list):
+            raise Exception(
+                "Invalid records format returned by AI."
+            )
+
+        return records
+
+    except Exception as e:
+
+        raise Exception(
+            f"Data extraction failed: {str(e)}"
+        )
+
+
+# ============================================================
+# CLEAN RECORDS
+# ============================================================
+
+def clean_records(
+    records,
+    columns,
+    number_needed
+):
 
     cleaned = []
 
@@ -442,48 +432,37 @@ def clean_records(
         if not isinstance(record, dict):
             continue
 
-        row = {}
+        new_record = {}
 
         for column in columns:
 
-            value = record.get(
-                column,
-                ""
-            )
+            value = record.get(column, "")
 
             if value is None:
                 value = ""
 
-            if isinstance(
-                value,
-                (list, dict)
-            ):
-
-                value = json.dumps(
-                    value,
-                    ensure_ascii=False
+            if isinstance(value, list):
+                value = ", ".join(
+                    str(x) for x in value
                 )
 
-            row[column] = str(
-                value
-            ).strip()
+            new_record[column] = str(value).strip()
 
-        # Ignore completely empty records
+        # Ignore completely empty rows
         if any(
             value != ""
-            for value in row.values()
+            for value in new_record.values()
         ):
-
-            cleaned.append(row)
+            cleaned.append(new_record)
 
     return cleaned[:number_needed]
 
 
 # ============================================================
-# EXCEL
+# EXCEL CREATION
 # ============================================================
 
-def make_excel(df):
+def create_excel(df):
 
     output = BytesIO()
 
@@ -495,8 +474,38 @@ def make_excel(df):
         df.to_excel(
             writer,
             index=False,
-            sheet_name="Results"
+            sheet_name="Professors"
         )
+
+        worksheet = writer.sheets["Professors"]
+
+        # Automatically adjust column widths
+        for column_cells in worksheet.columns:
+
+            max_length = 0
+            column_letter = column_cells[0].column_letter
+
+            for cell in column_cells:
+
+                try:
+                    cell_length = len(
+                        str(cell.value)
+                    )
+
+                    max_length = max(
+                        max_length,
+                        cell_length
+                    )
+
+                except Exception:
+                    pass
+
+            worksheet.column_dimensions[
+                column_letter
+            ].width = min(
+                max_length + 2,
+                60
+            )
 
     output.seek(0)
 
@@ -507,47 +516,39 @@ def make_excel(df):
 # SIDEBAR
 # ============================================================
 
-with st.sidebar:
+st.sidebar.header("⚙️ Settings")
 
-    st.header("⚙️ Search Settings")
+number_needed = st.sidebar.number_input(
+    "How many professors?",
+    min_value=1,
+    max_value=20,
+    value=5,
+    step=1
+)
 
-    number_needed = st.number_input(
-        "Number of professors",
-        min_value=1,
-        max_value=50,
-        value=5,
-        step=1
-    )
-
-    st.caption(
-        "The app returns up to this many verified professors."
-    )
+st.sidebar.info(
+    "The app will return up to this many verified professors."
+)
 
 
 # ============================================================
-# STEP 1
+# STEP 1 — UPLOAD FILE
 # ============================================================
 
 st.header("1️⃣ Upload Spreadsheet")
 
 uploaded_file = st.file_uploader(
     "Upload your Excel or CSV file",
-    type=[
-        "xlsx",
-        "xls",
-        "csv"
-    ]
+    type=["xlsx", "xls", "csv"]
 )
 
-df = None
+columns = []
 
 if uploaded_file:
 
     try:
 
-        if uploaded_file.name.lower().endswith(
-            ".csv"
-        ):
+        if uploaded_file.name.lower().endswith(".csv"):
 
             df = pd.read_csv(
                 uploaded_file
@@ -565,16 +566,16 @@ if uploaded_file:
             for column in df.columns
         ]
 
+        columns = list(df.columns)
+
         st.success(
-            f"Loaded: {uploaded_file.name}"
+            f"Found {len(columns)} columns."
         )
 
-        st.write(
-            "**Detected columns:**"
-        )
+        st.write("Your spreadsheet columns:")
 
-        st.write(
-            list(df.columns)
+        st.code(
+            ", ".join(columns)
         )
 
         st.dataframe(
@@ -590,22 +591,22 @@ if uploaded_file:
 
 
 # ============================================================
-# STEP 2
+# STEP 2 — WEBSITE
 # ============================================================
 
-st.header("2️⃣ Institutional Website")
+st.header("2️⃣ University Website")
 
 website_url = st.text_input(
-    "Institutional website",
-    placeholder="https://www.unimelb.edu.au/cdmps/people"
+    "Enter the official university website/page",
+    placeholder="https://www.example.edu/people"
 )
 
 
 # ============================================================
-# STEP 3 - DEPARTMENT
+# STEP 3 — DEPARTMENT
 # ============================================================
 
-st.header("3️⃣ Professor Department")
+st.header("3️⃣ Select Department")
 
 department_options = [
     "Computer Science",
@@ -626,15 +627,15 @@ department_options = [
 ]
 
 department_choice = st.selectbox(
-    "Select department",
+    "Which department should the professors belong to?",
     department_options
 )
 
 if department_choice == "Other":
 
     department = st.text_input(
-        "Enter department name",
-        placeholder="e.g. Information Systems"
+        "Enter the exact department name",
+        placeholder="e.g. Information Technology"
     )
 
 else:
@@ -643,10 +644,10 @@ else:
 
 
 # ============================================================
-# STEP 4
+# START
 # ============================================================
 
-st.header("4️⃣ Generate")
+st.header("4️⃣ Start Research")
 
 if st.button(
     "🚀 Find Professors",
@@ -654,24 +655,22 @@ if st.button(
     use_container_width=True
 ):
 
-    # --------------------------------------------------------
+    # ----------------------------
     # Validation
-    # --------------------------------------------------------
+    # ----------------------------
 
-    if df is None:
+    if not uploaded_file:
 
         st.error(
             "Please upload your spreadsheet first."
         )
-
         st.stop()
 
     if not website_url.strip():
 
         st.error(
-            "Please enter the institutional website."
+            "Please enter the official university website."
         )
-
         st.stop()
 
     if not department.strip():
@@ -679,128 +678,150 @@ if st.button(
         st.error(
             "Please select or enter a department."
         )
-
         st.stop()
-
-    if not get_client():
-
-        st.error(
-            "GROQ_API_KEY is missing."
-        )
-
-        st.info(
-            "Add GROQ_API_KEY in Streamlit → Settings → Secrets."
-        )
-
-        st.stop()
-
-    # --------------------------------------------------------
-    # Research
-    # --------------------------------------------------------
-
-    st.subheader(
-        "🔎 Researching official website..."
-    )
-
-    status = st.empty()
-
-    status.info(
-        f"Searching for {department} professors "
-        f"and verifying information..."
-    )
 
     try:
 
-        result = research_website(
-            website_url=website_url,
-            department=department,
-            columns=list(df.columns),
-            number_needed=number_needed
-        )
-
-        status.empty()
+        get_client()
 
     except Exception as e:
 
-        status.empty()
+        st.error(str(e))
+        st.stop()
+
+
+    # ========================================================
+    # RESEARCH
+    # ========================================================
+
+    try:
+
+        progress = st.progress(
+            0,
+            text="Starting research..."
+        )
+
+        status = st.empty()
+
+        status.info(
+            "🔎 Searching the official university website..."
+        )
+
+        progress.progress(
+            20,
+            text="Searching official website..."
+        )
+
+        research_text = research_website(
+            website_url=website_url,
+            department=department,
+            number_needed=number_needed
+        )
+
+        progress.progress(
+            60,
+            text="Official website research completed."
+        )
+
+        # Show a small research preview
+        with st.expander(
+            "🔍 View research evidence"
+        ):
+
+            st.text(
+                research_text[:12000]
+            )
+
+        status.info(
+            "🧠 Extracting verified professor information..."
+        )
+
+        # ====================================================
+        # EXTRACTION
+        # ====================================================
+
+        records = extract_professors(
+            research_text=research_text,
+            columns=columns,
+            department=department,
+            number_needed=number_needed
+        )
+
+        progress.progress(
+            90,
+            text="Preparing spreadsheet..."
+        )
+
+        records = clean_records(
+            records=records,
+            columns=columns,
+            number_needed=number_needed
+        )
+
+        if not records:
+
+            progress.empty()
+
+            st.warning(
+                "No verified professors were found for "
+                f"the department: {department}"
+            )
+
+            st.stop()
+
+        result_df = pd.DataFrame(
+            records,
+            columns=columns
+        )
+
+        progress.progress(
+            100,
+            text="Complete!"
+        )
+
+        status.success(
+            f"✅ Found {len(result_df)} verified professor(s) "
+            f"from {department}."
+        )
+
+        # ====================================================
+        # RESULTS
+        # ====================================================
+
+        st.header("📊 Results")
+
+        st.dataframe(
+            result_df,
+            use_container_width=True,
+            height=500
+        )
+
+        # ====================================================
+        # DOWNLOAD
+        # ====================================================
+
+        excel_file = create_excel(
+            result_df
+        )
+
+        st.download_button(
+            label="⬇️ Download Completed Excel",
+            data=excel_file,
+            file_name="professor_information.xlsx",
+            mime=(
+                "application/vnd.openxmlformats-officedocument."
+                "spreadsheetml.sheet"
+            ),
+            use_container_width=True
+        )
+
+    except Exception as e:
 
         st.error(
-            "Research failed."
+            f"❌ {str(e)}"
         )
 
-        st.code(
-            str(e)
+        st.info(
+            "Try again with the university's faculty/people "
+            "page as the starting URL."
         )
-
-        st.stop()
-
-    # --------------------------------------------------------
-    # Clean
-    # --------------------------------------------------------
-
-    records = clean_records(
-        result,
-        list(df.columns),
-        number_needed
-    )
-
-    # --------------------------------------------------------
-    # No results
-    # --------------------------------------------------------
-
-    if not records:
-
-        st.warning(
-            f"No verified professors from "
-            f"'{department}' were found on the "
-            f"official institutional website."
-        )
-
-        st.stop()
-
-    # --------------------------------------------------------
-    # DataFrame
-    # --------------------------------------------------------
-
-    result_df = pd.DataFrame(
-        records,
-        columns=list(df.columns)
-    )
-
-    # --------------------------------------------------------
-    # Results
-    # --------------------------------------------------------
-
-    st.success(
-        f"Found {len(result_df)} verified "
-        f"{department} professor(s)."
-    )
-
-    st.subheader(
-        "📊 Prepared Spreadsheet"
-    )
-
-    st.dataframe(
-        result_df,
-        use_container_width=True,
-        height=500
-    )
-
-    # --------------------------------------------------------
-    # Download
-    # --------------------------------------------------------
-
-    excel_file = make_excel(
-        result_df
-    )
-
-    st.download_button(
-        label="⬇️ Download Prepared Spreadsheet",
-        data=excel_file,
-        file_name="professor_information.xlsx",
-        mime=(
-            "application/vnd.openxmlformats-officedocument."
-            "spreadsheetml.sheet"
-        ),
-        use_container_width=True
-    )
