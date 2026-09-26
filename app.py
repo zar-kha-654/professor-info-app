@@ -1,12 +1,9 @@
 import streamlit as st
 import pandas as pd
-import requests
-from bs4 import BeautifulSoup
-from urllib.parse import urljoin, urlparse
 import json
 import re
-import time
 from io import BytesIO
+from groq import Groq
 
 
 # ============================================================
@@ -15,81 +12,313 @@ from io import BytesIO
 
 MODEL = "openai/gpt-oss-120b"
 
-REQUEST_TIMEOUT = 20
-MAX_PAGES = 40
-MAX_TEXT_PER_PAGE = 15000
-REQUEST_DELAY = 0.3
-
-USER_AGENT = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) "
-    "Chrome/153.0.0.0 Safari/537.36"
-)
-
 
 # ============================================================
-# STREAMLIT
+# PAGE
 # ============================================================
 
 st.set_page_config(
-    page_title="University Information Extractor",
+    page_title="Professor Info Extractor",
     page_icon="🎓",
     layout="wide"
 )
 
-st.title("🎓 University Information Extractor")
+st.title("🎓 Professor Information Extractor")
 
 st.write(
-    "Upload a spreadsheet, provide an institutional website, "
-    "choose how many records you need, and generate a completed spreadsheet."
+    "Upload your spreadsheet, enter an institutional website, "
+    "choose how many professors you need, and download the completed file."
 )
 
 st.info(
-    "The AI is instructed to use only information explicitly found "
-    "on the provided website. Missing information is left blank."
+    "The AI is instructed to use ONLY information found on the "
+    "institution's website. If something cannot be found, it stays blank."
 )
 
 
 # ============================================================
-# GROQ
+# API
 # ============================================================
 
-def get_api_key():
+def get_client():
 
     try:
-        return st.secrets["GROQ_API_KEY"]
-
+        api_key = st.secrets["GROQ_API_KEY"]
     except Exception:
         return None
 
-
-def ask_groq(prompt):
-
-    api_key = get_api_key()
-
     if not api_key:
+        return None
+
+    return Groq(api_key=api_key)
+
+
+# ============================================================
+# EXTRACT JSON
+# ============================================================
+
+def parse_json(text):
+
+    text = text.strip()
+
+    # Remove markdown fences if they appear
+    text = re.sub(
+        r"```json\s*",
+        "",
+        text,
+        flags=re.IGNORECASE
+    )
+
+    text = re.sub(
+        r"```\s*$",
+        "",
+        text
+    )
+
+    text = text.strip()
+
+    # First try normal JSON
+    try:
+        return json.loads(text)
+    except Exception:
+        pass
+
+    # Find JSON object
+    start = text.find("{")
+    end = text.rfind("}")
+
+    if start != -1 and end != -1:
+
+        try:
+            return json.loads(
+                text[start:end + 1]
+            )
+        except Exception:
+            pass
+
+    raise ValueError(
+        "The AI returned invalid JSON."
+    )
+
+
+# ============================================================
+# AI RESEARCH
+# ============================================================
+
+def research_website(
+    website_url,
+    columns,
+    number_needed
+):
+
+    client = get_client()
+
+    if client is None:
         raise ValueError(
             "GROQ_API_KEY is missing from Streamlit Secrets."
         )
 
-    url = "https://api.groq.com/openai/v1/chat/completions"
+    # Extract domain
+    domain_match = re.search(
+        r"https?://([^/]+)",
+        website_url
+    )
 
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json"
-    }
+    if domain_match:
+        domain = domain_match.group(1)
+    else:
+        domain = website_url
 
-    payload = {
-        "model": MODEL,
-        "messages": [
+    columns_text = "\n".join(
+        f"- {column}"
+        for column in columns
+    )
+
+    prompt = f"""
+You are a website research and structured-data extraction agent.
+
+The user gave you this institutional website:
+
+{website_url}
+
+Institution domain:
+
+{domain}
+
+The user uploaded a spreadsheet with these EXACT columns:
+
+{columns_text}
+
+The user wants up to {number_needed} professor/faculty records.
+
+==================================================
+YOUR TASK
+==================================================
+
+Use your browser search capability to research ONLY the
+institution represented by:
+
+{domain}
+
+You MUST NOT use information from unrelated universities,
+blogs, LinkedIn, Wikipedia, social media, ranking websites,
+or other third-party sources.
+
+The institution's own official website is the ONLY acceptable
+source of information.
+
+Start with the supplied URL:
+
+{website_url}
+
+Find relevant faculty/people/professor pages on the same
+institutional website.
+
+You may also search the same official institutional domain
+for information such as:
+
+- university name
+- faculty
+- professors
+- departments
+- programs
+- application fee
+- application deadline
+- admissions
+- program pages
+
+==================================================
+STRICT INFORMATION RULES
+==================================================
+
+1. ONLY use information explicitly found on the official
+   institutional website.
+
+2. NEVER use your general knowledge.
+
+3. NEVER guess.
+
+4. NEVER infer an email address.
+
+5. NEVER create an email from a professor's name.
+
+6. NEVER invent an application fee.
+
+7. NEVER invent an application deadline.
+
+8. NEVER invent a department.
+
+9. NEVER invent a university name.
+
+10. If information is not found, return an empty string.
+
+11. Do not use information from another university.
+
+12. Do not use third-party websites.
+
+13. Prefer official individual professor profile pages when
+    available.
+
+14. Prefer actual professors, associate professors, assistant
+    professors, faculty members, academic staff, or researchers
+    explicitly identified by the university.
+
+15. Do not include students.
+
+16. Do not include random staff members unless they are clearly
+    academic/faculty members.
+
+17. Do not include advisory board members unless the university
+    explicitly identifies them as academic/faculty members.
+
+18. Return no more than {number_needed} people.
+
+19. Do not make up additional records just to reach the requested
+    number.
+
+20. If only 3 suitable professors can be verified, return 3.
+
+==================================================
+APPLICATION INFORMATION
+==================================================
+
+Application fee and deadline may exist on a separate official
+admissions/program page.
+
+If you find them on the official institutional website, use them.
+
+If you cannot find them, leave the cells blank.
+
+Do NOT assume that a fee or deadline applies to every program
+unless the official website explicitly indicates that it does.
+
+==================================================
+SPREADSHEET RULE
+==================================================
+
+You MUST return EXACTLY the following columns:
+
+{columns_text}
+
+Do not add columns.
+
+Do not rename columns.
+
+Do not remove columns.
+
+==================================================
+OUTPUT
+==================================================
+
+Return ONLY a JSON object.
+
+Use this exact structure:
+
+{{
+    "records": [
+        {{
+            "COLUMN_NAME_1": "value",
+            "COLUMN_NAME_2": "value"
+        }}
+    ]
+}}
+
+Every record must contain every requested column.
+
+If a value cannot be verified from the official website,
+use an empty string.
+
+==================================================
+IMPORTANT
+==================================================
+
+The final spreadsheet must contain factual information
+that can be traced to the official institutional website.
+
+DO NOT fill missing information with your own knowledge.
+
+Institutional website:
+
+{website_url}
+
+Requested columns:
+
+{columns_text}
+
+Requested number of professors:
+
+{number_needed}
+"""
+
+    response = client.chat.completions.create(
+        model=MODEL,
+        messages=[
             {
                 "role": "system",
                 "content": (
-                    "You are a strict website information extraction "
-                    "assistant. Use ONLY the information provided in "
-                    "the website content. Never guess, infer, fabricate, "
-                    "or use outside knowledge. If information is not "
-                    "explicitly available, return an empty string."
+                    "You are a strict web research and data extraction "
+                    "agent. Never fabricate information. Use only "
+                    "official institutional sources requested by the user."
                 )
             },
             {
@@ -97,526 +326,57 @@ def ask_groq(prompt):
                 "content": prompt
             }
         ],
-        "temperature": 0,
-        "max_tokens": 12000
-    }
-
-    response = requests.post(
-        url,
-        headers=headers,
-        json=payload,
-        timeout=120
+        tools=[
+            {
+                "type": "browser_search"
+            }
+        ],
+        tool_choice="auto",
+        response_format={
+            "type": "json_object"
+        }
     )
 
-    if response.status_code != 200:
+    content = response.choices[0].message.content
 
-        raise RuntimeError(
-            f"Groq API error {response.status_code}: "
-            f"{response.text}"
+    if not content:
+        raise ValueError(
+            "The AI did not return any results."
         )
 
-    data = response.json()
-
-    return data["choices"][0]["message"]["content"]
-
-
-# ============================================================
-# URL HELPERS
-# ============================================================
-
-def normalize_url(url):
-
-    url = url.strip()
-
-    if not url.startswith(("http://", "https://")):
-        url = "https://" + url
-
-    return url.rstrip("/")
-
-
-def get_domain(url):
-
-    parsed = urlparse(url)
-
-    domain = parsed.netloc.lower()
-
-    if domain.startswith("www."):
-        domain = domain[4:]
-
-    return domain
-
-
-def same_domain(url, original_domain):
-
-    try:
-
-        domain = get_domain(url)
-
-        return (
-            domain == original_domain
-            or domain.endswith("." + original_domain)
-        )
-
-    except Exception:
-
-        return False
-
-
-# ============================================================
-# PAGE DOWNLOAD
-# ============================================================
-
-def download_page(url):
-    """
-    Download a webpage and extract its text and links.
-    Designed to work with university websites that use
-    stricter HTTP/CDN configurations.
-    """
-
-    headers_list = [
-        {
-            "User-Agent": USER_AGENT,
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "Accept-Language": "en-US,en;q=0.9",
-            "Accept-Encoding": "gzip, deflate",
-            "Connection": "keep-alive",
-            "Upgrade-Insecure-Requests": "1",
-        },
-        {
-            "User-Agent": (
-                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/131.0.0.0 Safari/537.36"
-            ),
-            "Accept": "*/*",
-            "Accept-Language": "en-US,en;q=0.9",
-        },
-    ]
-
-    for headers in headers_list:
-
-        try:
-
-            session = requests.Session()
-
-            response = session.get(
-                url,
-                headers=headers,
-                timeout=REQUEST_TIMEOUT,
-                allow_redirects=True
-            )
-
-            # Don't require a particular Content-Type.
-            # Some university/CDN servers don't report it normally.
-            if response.status_code != 200:
-                continue
-
-            html = response.content
-
-            if not html:
-                continue
-
-            soup = BeautifulSoup(
-                html,
-                "html.parser"
-            )
-
-            # Remove things we don't need
-            for tag in soup.find_all([
-                "script",
-                "style",
-                "noscript",
-                "svg"
-            ]):
-                tag.decompose()
-
-            # Extract text
-            text = soup.get_text(
-                separator=" ",
-                strip=True
-            )
-
-            text = re.sub(
-                r"\s+",
-                " ",
-                text
-            ).strip()
-
-            if not text:
-                continue
-
-            text = text[:MAX_TEXT_PER_PAGE]
-
-            # Extract links
-            links = []
-
-            for a in soup.find_all("a", href=True):
-
-                href = a.get("href")
-
-                if not href:
-                    continue
-
-                if href.startswith(
-                    (
-                        "mailto:",
-                        "tel:",
-                        "javascript:",
-                        "#"
-                    )
-                ):
-                    continue
-
-                absolute_url = urljoin(
-                    response.url,
-                    href
-                )
-
-                absolute_url = absolute_url.split("#")[0]
-
-                links.append(
-                    absolute_url
-                )
-
-            return text, list(set(links))
-
-        except requests.RequestException:
-            continue
-
-        except Exception:
-            continue
-
-    return "", []
-
-
-# ============================================================
-# LINK PRIORITY
-# ============================================================
-
-def score_url(url):
-
-    url_lower = url.lower()
-
-    keywords = [
-        ("faculty", 20),
-        ("people", 20),
-        ("professor", 20),
-        ("academic", 15),
-        ("academics", 15),
-        ("staff", 15),
-        ("directory", 15),
-        ("department", 12),
-        ("school", 10),
-        ("research", 10),
-        ("program", 10),
-        ("programs", 10),
-        ("admission", 12),
-        ("admissions", 12),
-        ("application", 12),
-        ("apply", 12),
-        ("deadline", 10),
-        ("fee", 10),
-        ("fees", 10),
-        ("tuition", 8),
-        ("contact", 5)
-    ]
-
-    score = 0
-
-    for keyword, points in keywords:
-
-        if keyword in url_lower:
-            score += points
-
-    return score
-
-
-# ============================================================
-# WEBSITE CRAWLER
-# ============================================================
-
-def crawl_website(start_url, max_pages):
-
-    start_url = normalize_url(start_url)
-
-    original_domain = get_domain(start_url)
-
-    visited = set()
-
-    queue = [
-        start_url
-    ]
-
-    pages = []
-
-    progress = st.progress(0)
-
-    status = st.empty()
-
-    while queue and len(pages) < max_pages:
-
-        # Highest priority first
-        queue = sorted(
-            list(set(queue)),
-            key=score_url,
-            reverse=True
-        )
-
-        current_url = queue.pop(0)
-
-        if current_url in visited:
-            continue
-
-        if not same_domain(
-            current_url,
-            original_domain
-        ):
-            continue
-
-        visited.add(current_url)
-
-        status.write(
-            f"🔎 Scanning {len(pages) + 1}/{max_pages}: "
-            f"{current_url}"
-        )
-
-        text, links = download_page(
-            current_url
-        )
-
-        if text:
-
-            pages.append({
-                "url": current_url,
-                "text": text
-            })
-
-        # Add useful same-domain links
-        for link in links:
-
-            if link in visited:
-                continue
-
-            if not same_domain(
-                link,
-                original_domain
-            ):
-                continue
-
-            # Avoid obvious files
-            lower = link.lower()
-
-            if lower.endswith((
-                ".pdf",
-                ".jpg",
-                ".jpeg",
-                ".png",
-                ".gif",
-                ".zip",
-                ".doc",
-                ".docx",
-                ".xls",
-                ".xlsx"
-            )):
-                continue
-
-            queue.append(link)
-
-        progress.progress(
-            min(
-                len(pages) / max_pages,
-                1.0
-            )
-        )
-
-        time.sleep(
-            REQUEST_DELAY
-        )
-
-    progress.empty()
-    status.empty()
-
-    return pages
-
-
-# ============================================================
-# WEBSITE CONTEXT
-# ============================================================
-
-def build_context(pages):
-
-    pieces = []
-
-    for number, page in enumerate(pages, 1):
-
-        pieces.append(
-            f"""
-==================================================
-PAGE {number}
-URL: {page["url"]}
-==================================================
-
-{page["text"]}
-"""
-        )
-
-    return "\n".join(pieces)
-
-
-# ============================================================
-# JSON PARSER
-# ============================================================
-
-def parse_json(response):
-
-    response = response.strip()
-
-    # Remove markdown fences
-    response = re.sub(
-        r"```json",
-        "",
-        response,
-        flags=re.IGNORECASE
-    )
-
-    response = response.replace(
-        "```",
-        ""
-    ).strip()
-
-    # Try array
-    start = response.find("[")
-    end = response.rfind("]")
-
-    if start != -1 and end != -1:
-
-        candidate = response[
-            start:end + 1
-        ]
-
-        try:
-            return json.loads(candidate)
-
-        except Exception:
-            pass
-
-    # Try object
-    start = response.find("{")
-    end = response.rfind("}")
-
-    if start != -1 and end != -1:
-
-        candidate = response[
-            start:end + 1
-        ]
-
-        try:
-
-            obj = json.loads(candidate)
-
-            if "professors" in obj:
-                return obj["professors"]
-
-        except Exception:
-            pass
-
-    raise ValueError(
-        "The AI did not return valid JSON."
-    )
-
-
-# ============================================================
-# AI EXTRACTION
-# ============================================================
-
-def extract_information(
-    website_context,
-    columns,
-    number_needed
-):
-
-    column_text = "\n".join(
-        f"- {column}"
-        for column in columns
-    )
-
-    prompt = f"""
-Extract information from the institutional website content below.
-
-The spreadsheet contains these EXACT columns:
-
-{column_text}
-
-The user wants up to {number_needed} professor/faculty records.
-
-RULES:
-
-1. Use ONLY information explicitly present in the website content.
-2. Never use your general knowledge.
-3. Never guess.
-4. Never infer an email address.
-5. Never invent an application fee.
-6. Never invent an application deadline.
-7. Never invent a department.
-8. Never invent a university name.
-9. If a field is unavailable, use "".
-10. Return at most {number_needed} people.
-11. Prefer actual academic/professor/faculty members.
-12. Do not include students unless the website explicitly identifies them
-    as faculty/professors.
-13. Do not include advisory board members unless they are clearly
-    university academic staff.
-14. Preserve the exact spreadsheet column names.
-15. Do not create additional columns.
-16. Return ONLY valid JSON.
-
-For website/profile links, use a URL explicitly present in the supplied
-website content.
-
-Return exactly this structure:
-
-[
-  {{
-    "column name": "value"
-  }}
-]
-
-Spreadsheet columns:
-
-{column_text}
-
-WEBSITE CONTENT:
-
-{website_context}
-"""
-
-    response = ask_groq(
-        prompt
-    )
-
-    return parse_json(
-        response
-    )
+    return parse_json(content)
 
 
 # ============================================================
 # CLEAN RESULTS
 # ============================================================
 
-def clean_results(
-    records,
+def clean_records(
+    data,
     columns,
-    number_needed
+    requested_number
 ):
 
-    final = []
+    if isinstance(data, dict):
+
+        records = data.get(
+            "records",
+            []
+        )
+
+    elif isinstance(data, list):
+
+        records = data
+
+    else:
+
+        records = []
+
+    cleaned = []
 
     for record in records:
 
-        if not isinstance(
-            record,
-            dict
-        ):
+        if not isinstance(record, dict):
             continue
 
         row = {}
@@ -631,9 +391,17 @@ def clean_results(
             if value is None:
                 value = ""
 
-            row[column] = str(
-                value
-            ).strip()
+            # Convert lists/dicts safely
+            if isinstance(value, (list, dict)):
+
+                value = json.dumps(
+                    value,
+                    ensure_ascii=False
+                )
+
+            value = str(value).strip()
+
+            row[column] = value
 
         # Don't include completely empty rows
         if any(
@@ -641,16 +409,16 @@ def clean_results(
             for value in row.values()
         ):
 
-            final.append(row)
+            cleaned.append(row)
 
-    return final[:number_needed]
+    return cleaned[:requested_number]
 
 
 # ============================================================
 # EXCEL
 # ============================================================
 
-def dataframe_to_excel(df):
+def make_excel(df):
 
     output = BytesIO()
 
@@ -679,32 +447,26 @@ with st.sidebar:
     st.header("⚙️ Settings")
 
     number_needed = st.number_input(
-        "Number of professors",
+        "How many professors?",
         min_value=1,
         max_value=50,
-        value=5
-    )
-
-    max_pages = st.slider(
-        "Maximum pages to scan",
-        min_value=5,
-        max_value=50,
-        value=30
+        value=5,
+        step=1
     )
 
     st.caption(
-        "More pages = potentially better coverage but slower processing."
+        "The app will return up to this many verified records."
     )
 
 
 # ============================================================
-# UPLOAD
+# STEP 1
 # ============================================================
 
 st.header("1️⃣ Upload Spreadsheet")
 
 uploaded_file = st.file_uploader(
-    "Choose your Excel or CSV file",
+    "Upload Excel or CSV",
     type=[
         "xlsx",
         "xls",
@@ -718,9 +480,7 @@ if uploaded_file:
 
     try:
 
-        if uploaded_file.name.lower().endswith(
-            ".csv"
-        ):
+        if uploaded_file.name.lower().endswith(".csv"):
 
             df = pd.read_csv(
                 uploaded_file
@@ -732,13 +492,17 @@ if uploaded_file:
                 uploaded_file
             )
 
+        # Clean column names
+        df.columns = [
+            str(column).strip()
+            for column in df.columns
+        ]
+
         st.success(
-            f"Loaded {uploaded_file.name}"
+            f"Loaded: {uploaded_file.name}"
         )
 
-        st.write(
-            "**Columns detected:**"
-        )
+        st.write("### Your columns")
 
         st.write(
             list(df.columns)
@@ -752,38 +516,42 @@ if uploaded_file:
     except Exception as e:
 
         st.error(
-            f"Could not read spreadsheet: {e}"
+            f"Could not read the spreadsheet: {e}"
         )
 
 
 # ============================================================
-# URL
+# STEP 2
 # ============================================================
 
 st.header("2️⃣ Institutional Website")
 
 website_url = st.text_input(
-    "Website URL",
+    "Paste the university/institution website URL",
     placeholder="https://www.unimelb.edu.au/cdmps/people"
 )
 
 
 # ============================================================
-# RUN
+# STEP 3
 # ============================================================
 
 st.header("3️⃣ Generate")
 
 if st.button(
-    "🚀 Find Information",
+    "🚀 Find Professor Information",
     type="primary",
     use_container_width=True
 ):
 
+    # -------------------------------
+    # Validation
+    # -------------------------------
+
     if df is None:
 
         st.error(
-            "Please upload a spreadsheet first."
+            "Please upload your spreadsheet first."
         )
 
         st.stop()
@@ -791,124 +559,101 @@ if st.button(
     if not website_url.strip():
 
         st.error(
-            "Please enter a website URL."
+            "Please enter the institutional website URL."
         )
 
         st.stop()
 
-    if not get_api_key():
+    if not get_client():
 
         st.error(
-            "GROQ_API_KEY is missing from Streamlit Secrets."
+            "GROQ_API_KEY is missing."
+        )
+
+        st.info(
+            "Add GROQ_API_KEY under Streamlit → Settings → Secrets."
         )
 
         st.stop()
 
-    columns = list(
-        df.columns
-    )
-
-    # --------------------------------------------------------
-    # Crawl
-    # --------------------------------------------------------
+    # -------------------------------
+    # Research
+    # -------------------------------
 
     st.subheader(
-        "🔎 Searching website..."
+        "🔎 Researching official website..."
     )
 
-    pages = crawl_website(
-        website_url,
-        max_pages
-    )
+    status = st.empty()
 
-    if not pages:
-
-        st.error(
-            "No readable pages were found."
-        )
-
-        st.warning(
-            "The website may block automated requests. "
-            "Try the main university website or another faculty page."
-        )
-
-        st.stop()
-
-    st.success(
-        f"Successfully read {len(pages)} pages."
-    )
-
-    # --------------------------------------------------------
-    # Show pages
-    # --------------------------------------------------------
-
-    with st.expander(
-        "View scanned pages"
-    ):
-
-        for page in pages:
-
-            st.write(
-                page["url"]
-            )
-
-    # --------------------------------------------------------
-    # AI
-    # --------------------------------------------------------
-
-    st.subheader(
-        "🤖 Extracting information..."
-    )
-
-    context = build_context(
-        pages
+    status.info(
+        "Groq is searching the institutional website and "
+        "finding relevant faculty and application information. "
+        "This can take a little time."
     )
 
     try:
 
-        records = extract_information(
-            website_context=context,
-            columns=columns,
+        result = research_website(
+            website_url=website_url,
+            columns=list(df.columns),
             number_needed=number_needed
         )
 
-        records = clean_results(
-            records,
-            columns,
-            number_needed
-        )
+        status.empty()
 
     except Exception as e:
 
+        status.empty()
+
         st.error(
-            f"Extraction failed: {e}"
+            "Research failed."
+        )
+
+        st.code(
+            str(e)
         )
 
         st.stop()
 
-    # --------------------------------------------------------
-    # Results
-    # --------------------------------------------------------
+    # -------------------------------
+    # Clean
+    # -------------------------------
+
+    records = clean_records(
+        result,
+        list(df.columns),
+        number_needed
+    )
 
     if not records:
 
         st.warning(
-            "No matching professor information was found."
+            "No verified professor records were found "
+            "on the supplied institutional website."
         )
 
         st.stop()
 
+    # -------------------------------
+    # Create DataFrame
+    # -------------------------------
+
     result_df = pd.DataFrame(
         records,
-        columns=columns
+        columns=list(df.columns)
     )
 
+    # -------------------------------
+    # Results
+    # -------------------------------
+
     st.success(
-        f"Found {len(result_df)} records."
+        f"Found {len(result_df)} verified records."
     )
 
     st.subheader(
-        "📊 Results"
+        "📊 Prepared Spreadsheet"
     )
 
     st.dataframe(
@@ -917,18 +662,18 @@ if st.button(
         height=500
     )
 
-    # --------------------------------------------------------
+    # -------------------------------
     # Download
-    # --------------------------------------------------------
+    # -------------------------------
 
-    excel = dataframe_to_excel(
+    excel_file = make_excel(
         result_df
     )
 
     st.download_button(
-        label="⬇️ Download Excel",
-        data=excel,
-        file_name="university_information.xlsx",
+        label="⬇️ Download Prepared Spreadsheet",
+        data=excel_file,
+        file_name="prepared_professor_information.xlsx",
         mime=(
             "application/vnd.openxmlformats-officedocument."
             "spreadsheetml.sheet"
